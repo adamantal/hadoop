@@ -1095,7 +1095,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       LOG.info("Need to save fs image? " + needToSave
           + " (staleImage=" + staleImage + ", haEnabled=" + haEnabled
           + ", isRollingUpgrade=" + isRollingUpgrade() + ")");
-      if (needToSave) {
+      if (needToSave || true) { //force save fsimage
         fsImage.saveNamespace(this);
       } else {
         // No need to save, so mark the phase done.
@@ -5194,6 +5194,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       if (childINode == null || !childINode.equals(tmpChild)) {
         // a newly created INode with the same name as an already deleted one
         // would be a different INode than the deleted one
+        LOG.info("PATCHED: skipping null INode childINode");
         return true;
       }
 

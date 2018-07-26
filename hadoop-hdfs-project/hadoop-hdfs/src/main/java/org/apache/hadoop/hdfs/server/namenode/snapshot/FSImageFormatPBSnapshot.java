@@ -36,6 +36,10 @@ import java.util.List;
 import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.fs.StorageType;
@@ -87,6 +91,8 @@ import com.google.protobuf.ByteString;
 
 @InterfaceAudience.Private
 public class FSImageFormatPBSnapshot {
+  public static final Log LOG = LogFactory.getLog(FSImageFormatPBSnapshot.class.getName());
+
   /**
    * Loading snapshot related information from protobuf based FSImage
    */
@@ -125,6 +131,10 @@ public class FSImageFormatPBSnapshot {
         INodeReferenceSection.INodeReference r) {
       long referredId = r.getReferredId();
       INode referred = fsDir.getInode(referredId);
+      if (referred == null) {
+        LOG.info("PATCHED: failed to find inode using reference ID " + referredId);
+        return null;
+      }
       WithCount withCount = (WithCount) referred.getParentReference();
       if (withCount == null) {
         withCount = new INodeReference.WithCount(null, referred);
@@ -284,9 +294,16 @@ public class FSImageFormatPBSnapshot {
       List<INode> clist = new ArrayList<INode>(size);
       for (long c = 0; c < size; c++) {
         CreatedListEntry entry = CreatedListEntry.parseDelimitedFrom(in);
-        INode created = SnapshotFSImageFormat.loadCreated(entry.getName()
-            .toByteArray(), dir);
-        clist.add(created);
+        try {
+          INode created = SnapshotFSImageFormat.loadCreated(entry.getName()
+                  .toByteArray(), dir);
+          clist.add(created);
+        } catch (IOException e) {
+          LOG.info("PATCHED: skipping error when loading created list of "
+                  + entry.getName().toStringUtf8() + " under "
+                  + dir.getFullPathName() + ": ", e);
+          clist.add(null);
+        }
       }
       return clist;
     }
@@ -310,14 +327,18 @@ public class FSImageFormatPBSnapshot {
       // load non-reference inodes
       for (long deletedId : deletedNodes) {
         INode deleted = fsDir.getInode(deletedId);
-        dlist.add(deleted);
-        addToDeletedList(deleted, dir);
+        if (deleted != null) {
+          dlist.add(deleted);
+          addToDeletedList(deleted, dir);
+        }
       }
       // load reference nodes in the deleted list
       for (int refId : deletedRefNodes) {
         INodeReference deletedRef = refList.get(refId);
-        dlist.add(deletedRef);
-        addToDeletedList(deletedRef, dir);
+        if (deletedRef != null) {
+          dlist.add(deletedRef);
+          addToDeletedList(deletedRef, dir);
+        }
       }
 
       Collections.sort(dlist, new Comparator<INode>() {
@@ -567,6 +588,10 @@ public class FSImageFormatPBSnapshot {
         throws IOException {
       // local names of the created list member
       for (INode c : created) {
+        if (c == null) {
+          LOG.info("PATCHED: skipped null INode in saveCreatedList");
+          continue;
+        }
         SnapshotDiffSection.CreatedListEntry.newBuilder()
             .setName(ByteString.copyFrom(c.getLocalNameBytes())).build()
             .writeDelimitedTo(out);
@@ -597,7 +622,20 @@ public class FSImageFormatPBSnapshot {
           }
           // process created list and deleted list
           List<INode> created = diff.getChildrenDiff().getCreatedUnmodifiable();
-          db.setCreatedListSize(created.size());
+          int noneNullCreated = 0;
+          for (INode c : created) {
+            if (c != null) {
+              noneNullCreated++;
+            }
+          }
+          if (noneNullCreated != created.size()) {
+            LOG.info("PATCHED: store " + noneNullCreated + " created diff entries " +
+                    "instead of " + created.size() + " under dir " +
+            dir.getFullPathName());
+          }
+          db.setCreatedListSize(noneNullCreated);
+
+          //shouldn't we examine the deleted list as well?
           List<INode> deleted = diff.getChildrenDiff().getDeletedUnmodifiable();
           INode previousNode = null;
           boolean misordered = false;
