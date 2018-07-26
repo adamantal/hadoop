@@ -201,10 +201,20 @@ public final class FSImageFormatPBINode {
         INodeDirectory p = dir.getInode(e.getParent()).asDirectory();
         for (long id : e.getChildrenList()) {
           INode child = dir.getInode(id);
+          if (child == null) {
+            LOG.warn("PATCHED: Skipping null INode in loadINodeDirectorySection: id " + id + " in parent "
+                    + p.getFullPathName() + " id " + p.getId());
+            continue;
+          }
           addToParent(p, child);
         }
         for (int refId : e.getRefChildrenList()) {
           INodeReference ref = refList.get(refId);
+          if (ref == null) {
+            LOG.info("PATCHED: Skipping null INodeReference in loadINodeDirectorySection: ref id="
+                    + refId + " parent=" + p.getFullPathName());
+            continue;
+          }
           addToParent(p, ref);
         }
       }
@@ -252,6 +262,14 @@ public final class FSImageFormatPBINode {
     }
 
     private void addToParent(INodeDirectory parent, INode child) {
+      if (parent == null) {
+        LOG.warn("PATCHED: Skipping null INodeDirectory in addToParent: parent=" + parent + " child="+child);
+        return;
+      }
+      if (child == null) {
+        LOG.warn("PATCHED: Skipping null INode in addToParent: parent=" + parent + " child="+child);
+        return;
+      }
       if (parent == dir.rootDir && FSDirectory.isReservedName(child)) {
         throw new HadoopIllegalArgumentException("File name \""
             + child.getLocalName() + "\" is reserved. Please "

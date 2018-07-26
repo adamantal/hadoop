@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import static org.apache.hadoop.hdfs.server.namenode.FSImageFormat.renameReservedPathsOnUpgrade;
 import static org.apache.hadoop.util.Time.now;
 
+import java.io.FileNotFoundException;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -227,10 +228,23 @@ public class FSEditLogLoader {
               LOG.trace("op=" + op + ", startOpt=" + startOpt
                   + ", numEdits=" + numEdits + ", totalEdits=" + totalEdits);
             }
-            long inodeId = applyEditLogOp(op, fsDir, startOpt,
-                in.getVersion(true), lastInodeId);
-            if (lastInodeId < inodeId) {
-              lastInodeId = inodeId;
+            try {
+              long inodeId = applyEditLogOp(op, fsDir, startOpt, in.getVersion(true), lastInodeId);
+              if (lastInodeId < inodeId) {
+                lastInodeId = inodeId;
+              }
+            } catch (FileNotFoundException fnfe) {
+              if (op.opCode == FSEditLogOpCodes.OP_CLOSE || op.opCode == FSEditLogOpCodes.OP_ADD_BLOCK) {
+                String imsg = "PATCHED: HDFS-7707 HACK: ignore ";
+                if (op.hasTransactionId()) {
+                  imsg += " tx: ";
+                  imsg += String.valueOf(op.getTransactionId());
+                  imsg += " ";
+                }
+                LOG.info(imsg + op, fnfe);
+              } else {
+                throw fnfe;
+              }
             }
           } catch (RollingUpgradeOp.RollbackException e) {
             throw e;
