@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 
 /**
  * A PBImageDelimitedTextWriter generates a text representation of the PB fsimage,
@@ -53,9 +54,9 @@ public class PBImageDelimitedTextWriter extends PBImageTextWriter {
 
   private final String delimiter;
 
-  PBImageDelimitedTextWriter(PrintStream out, String delimiter, String tempPath)
-      throws IOException {
-    super(out, tempPath);
+  PBImageDelimitedTextWriter(PrintStream out, String delimiter,
+      String tempPath, boolean addSnapshots) throws IOException {
+    super(out, tempPath, addSnapshots);
     this.delimiter = delimiter;
   }
 
@@ -167,5 +168,40 @@ public class PBImageDelimitedTextWriter extends PBImageTextWriter {
     append(buffer, "UserName");
     append(buffer, "GroupName");
     return buffer.toString();
+  }
+
+  @Override
+  public void afterOutput() throws IOException {
+    final String snapshotFolderName = "/.snapshot/";
+    List<INode> snapshotRoots = getSnapshotRoots();
+    for (INode snapshotRoot : snapshotRoots) {
+      StringBuffer buffer = new StringBuffer();
+      long parentId = snapshotRoot.getId();
+      String parentPath = getParentPath(parentId);
+      parentPath += getNodeName(parentId);
+      parentPath += snapshotFolderName;
+      Path path = new Path(parentPath, snapshotRoot.getName().toStringUtf8());
+      append(buffer, path.toString());
+      if (snapshotRoot.getType() != INode.Type.DIRECTORY) {
+        throw new IOException("Snapshot root is not directory!");
+      }
+      INodeDirectory dir = snapshotRoot.getDirectory();
+      PermissionStatus p = getPermission(dir.getPermission());
+      boolean hasAcl = dir.hasAcl() && dir.getAcl().getEntriesCount() > 0;
+      append(buffer, 0);  // Replication
+      append(buffer, formatDate(dir.getModificationTime()));
+      append(buffer, formatDate(0));  // Access time.
+      append(buffer, 0);  // Block size.
+      append(buffer, 0);  // Num blocks.
+      append(buffer, 0);  // Num bytes.
+      append(buffer, dir.getNsQuota());
+      append(buffer, dir.getDsQuota());
+      String aclString = hasAcl ? "+" : "";
+      append(buffer, "d" + p.getPermission().toString() + aclString);
+      append(buffer, p.getUserName());
+      append(buffer, p.getGroupName());
+
+      printIfNotEmpty(buffer.substring(1));
+    }
   }
 }

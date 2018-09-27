@@ -96,6 +96,8 @@ public class OfflineImageViewerPB {
       + "-t,--temp <arg>        Use temporary dir to cache intermediate result to generate\n"
       + "                       Delimited outputs. If not set, Delimited processor constructs\n"
       + "                       the namespace in memory before outputting text.\n"
+      + "--addSnapshots         Adds the snapshots to the output when used\n"
+      + "                       with Delimited processor\n"
       + "-h,--help              Display usage information and exit\n";
 
   /**
@@ -120,6 +122,7 @@ public class OfflineImageViewerPB {
     options.addOption("addr", true, "");
     options.addOption("delimiter", true, "");
     options.addOption("t", "temp", true, "");
+    options.addOption("addSnapshots", false, "");
 
     return options;
   }
@@ -207,8 +210,10 @@ public class OfflineImageViewerPB {
         }
         break;
       case "DELIMITED":
+        boolean addSnapshots = cmd.hasOption("addSnapshots");
         try (PBImageDelimitedTextWriter writer =
-            new PBImageDelimitedTextWriter(out, delimiter, tempPath)) {
+            new PBImageDelimitedTextWriter(out, delimiter, tempPath,
+                addSnapshots)) {
           writer.visit(new RandomAccessFile(inputFile, "r"));
         }
         break;

@@ -114,6 +114,9 @@ abstract class PBImageTextWriter implements Closeable {
 
     /** Synchronize metadata to persistent storage, if possible */
     public void sync() throws IOException;
+
+    /** Returns the name of inode. */
+    String getName(long id) throws IOException;
   }
 
   /**
@@ -149,9 +152,12 @@ abstract class PBImageTextWriter implements Closeable {
         if (this.path == null) {
           this.path = new Path(parent.getPath(), name.isEmpty() ? "/" : name).
               toString();
-          this.name = null;
         }
         return this.path;
+      }
+
+      String getName() {
+        return name;
       }
 
       @Override
@@ -212,6 +218,16 @@ abstract class PBImageTextWriter implements Closeable {
 
     @Override
     public void sync() {
+    }
+
+    @Override
+    public String getName(long id) throws IOException {
+      Dir dir = dirMap.get(id);
+      if (dir != null) {
+        return dir.getName();
+      }
+      PBImageTextWriter.ignoreSnapshotName(id);
+      return null;
     }
   }
 
@@ -389,11 +405,24 @@ abstract class PBImageTextWriter implements Closeable {
       dirChildMap.sync();
       dirMap.sync();
     }
+
+    @Override
+    public String getName(long id) throws IOException {
+      byte[] bytes = dirMap.get(toBytes(id));
+      if (bytes != null) {
+        return toString(bytes);
+      }
+      PBImageTextWriter.ignoreSnapshotName(id);
+      return null;
+    }
   }
 
+  private ImmutableList<Long> refIdList = null;
   private String[] stringTable;
   private PrintStream out;
   private MetadataMap metadataMap = null;
+  private boolean addSnapshots;
+  private ArrayList<INode> snapshotRoots = new ArrayList<>();
 
   /**
    * Construct a PB FsImage writer to generate text file.
@@ -401,8 +430,10 @@ abstract class PBImageTextWriter implements Closeable {
    * @param tempPath the path to store metadata. If it is empty, store metadata
    *                 in memory instead.
    */
-  PBImageTextWriter(PrintStream out, String tempPath) throws IOException {
+  PBImageTextWriter(PrintStream out, String tempPath, boolean addSnapshots)
+      throws IOException {
     this.out = out;
+    this.addSnapshots = addSnapshots;
     if (tempPath.isEmpty()) {
       metadataMap = new InMemoryMetadataDB();
     } else {
@@ -416,6 +447,10 @@ abstract class PBImageTextWriter implements Closeable {
     IOUtils.cleanup(null, metadataMap);
   }
 
+  List<INode> getSnapshotRoots() {
+    return snapshotRoots;
+  }
+
   /**
    * Get text output for the given inode.
    * @param parent the path of parent directory
@@ -427,6 +462,26 @@ abstract class PBImageTextWriter implements Closeable {
    * Get text output for the header line.
    */
   abstract protected String getHeader();
+
+  /**
+   * After the processor has iterated through the inodes from
+   * INodeDirectorySection, we can output extra information.
+   *
+   * @throws IOException
+   */
+  abstract protected void afterOutput() throws IOException;
+
+  /**
+   * For inodes not mentioned in the INodeDirectorySection (e.g. from
+   * snapshot) we can query their parent's path through this function.
+   *
+   * @param id
+   * @return the path of the parent's inode
+   * @throws IOException
+   */
+  String getParentPath(long id) throws IOException {
+    return metadataMap.getParentPath(id);
+  }
 
   public void visit(RandomAccessFile file) throws IOException {
     Configuration conf = new Configuration();
@@ -459,7 +514,6 @@ abstract class PBImageTextWriter implements Closeable {
             }
           });
 
-      ImmutableList<Long> refIdList = null;
       for (FileSummary.Section section : sections) {
         fin.getChannel().position(section.getOffset());
         is = FSImageUtil.wrapInputStreamForCompression(conf,
@@ -472,7 +526,6 @@ abstract class PBImageTextWriter implements Closeable {
           break;
         case INODE_REFERENCE:
           // Load INodeReference so that all INodes can be processed.
-          // Snapshots are not handled and will just be ignored for now.
           LOG.info("Loading inode references");
           refIdList = FSImageLoader.loadINodeReferenceSection(is);
           break;
@@ -482,10 +535,18 @@ abstract class PBImageTextWriter implements Closeable {
       }
 
       loadDirectories(fin, sections, summary, conf);
-      loadINodeDirSection(fin, sections, summary, conf, refIdList);
+      loadINodeDirSection(fin, sections, summary, conf);
+      if (addSnapshots) {
+        loadSnapshotSection(fin, sections, summary, conf);
+      }
       metadataMap.sync();
       output(conf, summary, fin, sections);
+      afterOutput();
     }
+  }
+
+  String getNodeName(long id) throws IOException {
+    return metadataMap.getName(id);
   }
 
   private void output(Configuration conf, FileSummary summary,
@@ -534,7 +595,7 @@ abstract class PBImageTextWriter implements Closeable {
 
   private void loadINodeDirSection(
       FileInputStream fin, List<FileSummary.Section> sections,
-      FileSummary summary, Configuration conf, List<Long> refIdList)
+      FileSummary summary, Configuration conf)
       throws IOException {
     LOG.info("Loading INode directory section.");
     long startTime = Time.monotonicNow();
@@ -545,7 +606,26 @@ abstract class PBImageTextWriter implements Closeable {
         InputStream is = FSImageUtil.wrapInputStreamForCompression(conf,
             summary.getCodec(), new BufferedInputStream(
                 new LimitInputStream(fin, section.getLength())));
-        buildNamespace(is, refIdList);
+        buildNamespace(is);
+      }
+    }
+    long timeTaken = Time.monotonicNow() - startTime;
+    LOG.info("Finished loading INode directory section in {}ms", timeTaken);
+  }
+
+  private void loadSnapshotSection(FileInputStream fin,
+      List<FileSummary.Section> sections, FileSummary summary,
+      Configuration conf) throws IOException {
+    LOG.info("Loading SnapshotSection.");
+    long startTime = Time.monotonicNow();
+    for (FileSummary.Section section : sections) {
+      if (SectionName.fromString(section.getName())
+          == SectionName.SNAPSHOT) {
+        fin.getChannel().position(section.getOffset());
+        InputStream is = FSImageUtil.wrapInputStreamForCompression(conf,
+            summary.getCodec(), new BufferedInputStream(
+                new LimitInputStream(fin, section.getLength())));
+        saveSnapshotFolders(is);
       }
     }
     long timeTaken = Time.monotonicNow() - startTime;
@@ -572,10 +652,20 @@ abstract class PBImageTextWriter implements Closeable {
     LOG.info("Found {} directories in INode section.", numDirs);
   }
 
+  private void saveSnapshotFolders(InputStream is) throws IOException {
+    FsImageProto.SnapshotSection s =
+        FsImageProto.SnapshotSection.parseDelimitedFrom(is);
+    for (int i = 0; i < s.getNumSnapshots(); ++i) {
+      FsImageProto.SnapshotSection.Snapshot snapshot =
+          FsImageProto.SnapshotSection.Snapshot.parseDelimitedFrom(is);
+      snapshotRoots.add(snapshot.getRoot());
+    }
+  }
+
   /**
    * Scan the INodeDirectory section to construct the namespace.
    */
-  private void buildNamespace(InputStream in, List<Long> refIdList)
+  private void buildNamespace(InputStream in)
       throws IOException {
     int count = 0;
     while (true) {
@@ -602,6 +692,12 @@ abstract class PBImageTextWriter implements Closeable {
     LOG.info("Scanned {} INode directories to build namespace.", count);
   }
 
+  void printIfNotEmpty(String line) {
+    if (!line.isEmpty()) {
+      out.println(line);
+    }
+  }
+
   private void outputINodes(InputStream in) throws IOException {
     INodeSection s = INodeSection.parseDelimitedFrom(in);
     LOG.info("Found {} INodes in the INode section", s.getNumInodes());
@@ -611,7 +707,7 @@ abstract class PBImageTextWriter implements Closeable {
       INode p = INode.parseDelimitedFrom(in);
       try {
         String parentPath = metadataMap.getParentPath(p.getId());
-        out.println(getEntry(parentPath, p));
+        printIfNotEmpty(getEntry(parentPath, p));
       } catch (IOException ioe) {
         ignored++;
         if (!(ioe instanceof IgnoreSnapshotException)) {

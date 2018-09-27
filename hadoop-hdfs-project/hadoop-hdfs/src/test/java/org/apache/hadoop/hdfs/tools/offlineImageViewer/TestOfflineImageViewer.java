@@ -669,7 +669,7 @@ public class TestOfflineImageViewer {
 
     try (PrintStream o = new PrintStream(output)) {
       PBImageDelimitedTextWriter v =
-          new PBImageDelimitedTextWriter(o, DELIMITER, db);
+          new PBImageDelimitedTextWriter(o, DELIMITER, db, false);
       v.visit(new RandomAccessFile(originalFsimage, "r"));
     }
 
@@ -702,6 +702,33 @@ public class TestOfflineImageViewer {
       }
     }
     assertEquals(writtenFiles.keySet(), fileNames);
+  }
+
+  @Test
+  public void testPBDelimitedWriterWithSnapshots() throws IOException {
+    final String delimiter = "\t";
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+    try (PrintStream o = new PrintStream(output)) {
+      PBImageDelimitedTextWriter v =
+          new PBImageDelimitedTextWriter(o, delimiter, "", true);
+      v.visit(new RandomAccessFile(originalFsimage, "r"));
+    }
+    try (
+        ByteArrayInputStream input =
+            new ByteArrayInputStream(output.toByteArray());
+        BufferedReader reader =
+            new BufferedReader(new InputStreamReader(input))) {
+      String line;
+      String snapshotEntry = null;
+      while ((line = reader.readLine()) != null) {
+        String[] fields = line.split(delimiter);
+        if (fields[0].contains("snapshot")) {
+          snapshotEntry = fields[0];
+        }
+      }
+      assertEquals("/src/.snapshot/snapshot", snapshotEntry);
+    }
   }
 
   private static void compareFile(FileStatus expected, FileStatus status) {
