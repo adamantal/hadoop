@@ -130,11 +130,15 @@ abstract class PBImageTextWriter implements Closeable {
       private final long inode;
       private Dir parent = null;
       private String name;
-      private String path = null;  // cached full path of the directory.
+      private String cachedPath = null;
 
       Dir(long inode, String name) {
         this.inode = inode;
         this.name = name;
+      }
+
+      private long getId() {
+        return inode;
       }
 
       private void setParent(Dir parent) {
@@ -145,19 +149,23 @@ abstract class PBImageTextWriter implements Closeable {
       /**
        * Returns the full path of this directory.
        */
-      private String getPath() {
+      private String getPath(boolean useCache) {
         if (this.parent == null) {
           return "/";
         }
-        if (this.path == null) {
-          this.path = new Path(parent.getPath(), name.isEmpty() ? "/" : name).
+        if (!useCache || this.cachedPath == null) {
+          this.cachedPath = new Path(parent.getPath(useCache), name.isEmpty() ? "/" : name).
               toString();
         }
-        return this.path;
+        return this.cachedPath;
       }
 
       String getName() {
         return name;
+      }
+
+      void setName(String name) {
+        this.name = name;
       }
 
       @Override
@@ -213,7 +221,7 @@ abstract class PBImageTextWriter implements Closeable {
         // For delimited oiv tool, no need to print out metadata in snapshots.
         PBImageTextWriter.ignoreSnapshotName(inode);
       }
-      return parent.getPath();
+      return parent.getPath(true);
     }
 
     @Override
@@ -229,6 +237,27 @@ abstract class PBImageTextWriter implements Closeable {
       PBImageTextWriter.ignoreSnapshotName(id);
       return null;
     }
+
+    public void setName(long id, String name) throws IOException {
+      Dir dir = dirMap.get(id);
+      if (dir != null) {
+        dir.setName(name);
+      }
+      PBImageTextWriter.ignoreSnapshotName(id);
+    }
+
+    /*public boolean isInShapshot(long id, Set<Long> snapshotRoots) {
+      if (snapshotRoots.contains(id)) {
+        return true;
+      }
+      Dir parent;
+      while ((parent = dirChildMap.get(id)) != null) {
+        if (snapshotRoots.contains(parent.getId())) {
+          return true;
+        }
+      }
+      return false;
+    }*/
   }
 
   /**
@@ -422,7 +451,7 @@ abstract class PBImageTextWriter implements Closeable {
   private PrintStream out;
   private MetadataMap metadataMap = null;
   private boolean addSnapshots;
-  private ArrayList<INode> snapshotRoots = new ArrayList<>();
+  private ArrayList<FsImageProto.SnapshotSection.Snapshot> snapshots = new ArrayList<>();
 
   /**
    * Construct a PB FsImage writer to generate text file.
@@ -447,8 +476,8 @@ abstract class PBImageTextWriter implements Closeable {
     IOUtils.cleanup(null, metadataMap);
   }
 
-  List<INode> getSnapshotRoots() {
-    return snapshotRoots;
+  List<FsImageProto.SnapshotSection.Snapshot> getSnapshots() {
+    return snapshots;
   }
 
   /**
@@ -481,6 +510,10 @@ abstract class PBImageTextWriter implements Closeable {
    */
   String getParentPath(long id) throws IOException {
     return metadataMap.getParentPath(id);
+  }
+
+  boolean isAddSnapshots() {
+    return addSnapshots;
   }
 
   public void visit(RandomAccessFile file) throws IOException {
@@ -625,11 +658,11 @@ abstract class PBImageTextWriter implements Closeable {
         InputStream is = FSImageUtil.wrapInputStreamForCompression(conf,
             summary.getCodec(), new BufferedInputStream(
                 new LimitInputStream(fin, section.getLength())));
-        saveSnapshotFolders(is);
+        saveSnapshotRoots(is);
       }
     }
     long timeTaken = Time.monotonicNow() - startTime;
-    LOG.info("Finished loading INode directory section in {}ms", timeTaken);
+    LOG.info("Finished loading SnapshotSection in {}ms", timeTaken);
   }
 
   /**
@@ -652,13 +685,13 @@ abstract class PBImageTextWriter implements Closeable {
     LOG.info("Found {} directories in INode section.", numDirs);
   }
 
-  private void saveSnapshotFolders(InputStream is) throws IOException {
+  private void saveSnapshotRoots(InputStream is) throws IOException {
     FsImageProto.SnapshotSection s =
         FsImageProto.SnapshotSection.parseDelimitedFrom(is);
     for (int i = 0; i < s.getNumSnapshots(); ++i) {
       FsImageProto.SnapshotSection.Snapshot snapshot =
           FsImageProto.SnapshotSection.Snapshot.parseDelimitedFrom(is);
-      snapshotRoots.add(snapshot.getRoot());
+      snapshots.add(snapshot);
     }
   }
 
