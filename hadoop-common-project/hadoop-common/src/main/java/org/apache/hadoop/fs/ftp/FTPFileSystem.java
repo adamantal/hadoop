@@ -62,6 +62,7 @@ public class FTPFileSystem extends FileSystem {
   public static final int DEFAULT_BUFFER_SIZE = 1024 * 1024;
 
   public static final int DEFAULT_BLOCK_SIZE = 4 * 1024;
+  public static final long DEFAULT_TIMEOUT = 300;
   public static final String FS_FTP_USER_PREFIX = "fs.ftp.user.";
   public static final String FS_FTP_HOST = "fs.ftp.host";
   public static final String FS_FTP_HOST_PORT = "fs.ftp.host.port";
@@ -71,6 +72,7 @@ public class FTPFileSystem extends FileSystem {
   public static final String FS_FTP_TRANSFER_MODE = "fs.ftp.transfer.mode";
   public static final String E_SAME_DIRECTORY_ONLY =
       "only same directory renames are supported";
+  public static final String FS_FTP_TIMEOUT = "fs.ftp.timeout";
 
   private URI uri;
 
@@ -139,6 +141,7 @@ public class FTPFileSystem extends FileSystem {
     int port = conf.getInt(FS_FTP_HOST_PORT, FTP.DEFAULT_PORT);
     String user = conf.get(FS_FTP_USER_PREFIX + host);
     String password = conf.get(FS_FTP_PASSWORD_PREFIX + host);
+    long timeout = conf.getLong(FS_FTP_TIMEOUT, DEFAULT_TIMEOUT);
     client = new FTPClient();
     client.connect(host, port);
     int reply = client.getReplyCode();
@@ -150,6 +153,7 @@ public class FTPFileSystem extends FileSystem {
       client.setFileTransferMode(getTransferMode(conf));
       client.setFileType(FTP.BINARY_FILE_TYPE);
       client.setBufferSize(DEFAULT_BUFFER_SIZE);
+      client.setControlKeepAliveTimeout(timeout);
       setDataConnectionMode(client, conf);
     } else {
       throw new IOException("Login failed on server - " + host + ", port - "
