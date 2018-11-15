@@ -160,6 +160,14 @@ call :updatepath %HADOOP_BIN_PATH%
     set CLASS=%hadoop-command%
   )
 
+  @rem if --help option is used, no need to call command
+  if [%hadoop-command%]==["jar"] (
+    if [!hadoop-command-arguments[%1%]!]==["--help"] (
+      @echo Usage: hadoop jar <jar> [mainClass] args...
+      goto :eof
+    )
+  )
+
   set path=%PATH%;%HADOOP_BIN_PATH%
 
   @rem Always respect HADOOP_OPTS and HADOOP_CLIENT_OPTS
