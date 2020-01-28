@@ -24,11 +24,14 @@ import com.sun.jersey.api.client.ClientHandlerException;
 import com.sun.jersey.api.client.UniformInterfaceException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.logaggregation.ContainerLogAggregationType;
+import org.apache.hadoop.yarn.logaggregation.ContainerLogMeta;
 import org.apache.hadoop.yarn.logaggregation.filecontroller.LogAggregationFileControllerFactory;
+import org.apache.hadoop.yarn.server.webapp.dao.ContainerLogsInfo;
 import org.apache.hadoop.yarn.util.Apps;
-import org.apache.hadoop.yarn.webapp.BadRequestException;
 import org.apache.hadoop.yarn.webapp.NotFoundException;
 import org.codehaus.jettison.json.JSONException;
 import org.slf4j.Logger;
@@ -36,8 +39,12 @@ import org.slf4j.LoggerFactory;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.GenericEntity;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Extracts aggregated logs and related information.
@@ -65,46 +72,166 @@ public class LogServlet extends Configured {
     return LogWebServiceUtils.getNMWebAddressFromRM(getConf(), nodeId);
   }
 
+  private static List<ContainerLogsInfo> convertToContainerLogsInfo(
+      List<ContainerLogMeta> containerLogMetas,
+      boolean emptyLocalContainerLogMeta) {
+    List<ContainerLogsInfo> containersLogsInfo = new ArrayList<>();
+    for (ContainerLogMeta meta : containerLogMetas) {
+      ContainerLogsInfo logInfo =
+          new ContainerLogsInfo(meta, ContainerLogAggregationType.AGGREGATED);
+      containersLogsInfo.add(logInfo);
+
+      if (emptyLocalContainerLogMeta) {
+        ContainerLogMeta emptyMeta =
+            new ContainerLogMeta(logInfo.getContainerId(),
+                logInfo.getNodeId() == null ? "N/A" : logInfo.getNodeId());
+        ContainerLogsInfo empty =
+            new ContainerLogsInfo(emptyMeta, ContainerLogAggregationType.LOCAL);
+        containersLogsInfo.add(empty);
+      }
+    }
+    return containersLogsInfo;
+  }
+
+  private static Response getContainerLogMeta(
+      WrappedLogMetaRequest request, boolean emptyLocalContainerLogMeta) {
+    try {
+      List<ContainerLogMeta> containerLogMeta = request.getContainerLogMetas();
+      if (containerLogMeta.isEmpty()) {
+        throw new NotFoundException("Can not get log meta for request.");
+      }
+      List<ContainerLogsInfo> containersLogsInfo = convertToContainerLogsInfo(
+          containerLogMeta, emptyLocalContainerLogMeta);
+
+      GenericEntity<List<ContainerLogsInfo>> meta =
+          new GenericEntity<List<ContainerLogsInfo>>(containersLogsInfo) {
+          };
+      Response.ResponseBuilder response = Response.ok(meta);
+      // Sending the X-Content-Type-Options response header with the value
+      // nosniff will prevent Internet Explorer from MIME-sniffing a response
+      // away from the declared content-type.
+      response.header("X-Content-Type-Options", "nosniff");
+      return response.build();
+    } catch (Exception ex) {
+      LOG.debug("Exception during request", ex);
+      throw new WebApplicationException(ex);
+    }
+  }
+
+  /**
+   * Validates whether the user has provided at least one query param for
+   * the request. Also validates that if multiple query params are provided,
+   * they do not contradict.
+   */
+  private void validateUserInput(ApplicationId applicationId,
+      ApplicationAttemptId applicationAttemptId, ContainerId containerId) {
+    if (applicationId == null && applicationAttemptId == null &&
+        containerId == null) {
+      throw new IllegalArgumentException("Should set application id, " +
+          "application attempt id or container id.");
+    }
+
+    if (containerId != null) {
+      if (applicationAttemptId != null) {
+        if (!applicationAttemptId.equals(containerId
+            .getApplicationAttemptId())) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Container %s does not belong to application attempt %s!",
+                  containerId, applicationAttemptId));
+        }
+      }
+      if (applicationId != null) {
+        if (!applicationId.equals(containerId.getApplicationAttemptId()
+            .getApplicationId())) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Container %s does not belong to application %s!",
+                  containerId, applicationId));
+        }
+      }
+    }
+    if (applicationAttemptId != null) {
+      if (applicationId != null) {
+        if (!applicationId.equals(applicationAttemptId.getApplicationId())) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Application attempt %s does not belong to application %s!",
+                  applicationAttemptId, applicationId));
+        }
+      }
+    }
+  }
+
+  public Response getLogsInfo(HttpServletRequest hsr, String appIdStr,
+      String appAttemptIdStr, String containerIdStr, String nmId,
+      boolean redirectedFromNode) {
+    ApplicationId appId = null;
+    try {
+      appId = ApplicationId.fromString(appIdStr);
+    } catch (Exception ignore) {
+    }
+
+    ApplicationAttemptId appAttemptId = null;
+    try {
+      appAttemptId = ApplicationAttemptId
+          .fromString(appAttemptIdStr);
+    } catch (Exception ignore) {
+    }
+
+    ContainerId containerId = null;
+    try {
+      containerId = ContainerId.fromString(containerIdStr);
+    } catch (Exception ignore) {
+    }
+
+    validateUserInput(appId, appAttemptId, containerId);
+
+    WrappedLogMetaRequest.Builder logMetaRequestBuilder =
+        WrappedLogMetaRequest.builder()
+            .setApplicationId(appId)
+            .setApplicationAttemptId(appAttemptId)
+            .setContainerId(containerIdStr);
+
+    return getContainerLogsInfo(hsr, logMetaRequestBuilder, nmId,
+        redirectedFromNode, null);
+  }
+
   /**
    * Returns information about the logs for a specific container.
    *
    * @param req the {@link HttpServletRequest}
-   * @param containerIdStr container id
+   * @param builder builder instance for the log meta request
    * @param nmId NodeManager id
    * @param redirectedFromNode whether the request was redirected
    * @param clusterId the id of the cluster
    * @return {@link Response} object containing information about the logs
    */
   public Response getContainerLogsInfo(HttpServletRequest req,
-      String containerIdStr, String nmId, boolean redirectedFromNode,
+      WrappedLogMetaRequest.Builder builder,
+      String nmId, boolean redirectedFromNode,
       String clusterId) {
-    ContainerId containerId = null;
-    try {
-      containerId = ContainerId.fromString(containerIdStr);
-    } catch (IllegalArgumentException e) {
-      throw new BadRequestException("invalid container id, " + containerIdStr);
-    }
 
-    ApplicationId appId = containerId.getApplicationAttemptId()
-        .getApplicationId();
+    builder.setFactory(factory);
+
     BasicAppInfo appInfo;
     try {
-      appInfo = appInfoProvider.getApp(req, appId.toString(), clusterId);
+      appInfo = appInfoProvider.getApp(req, builder.getAppId(), clusterId);
     } catch (Exception ex) {
+      LOG.info("Could not obtain appInfo object from provider.", ex);
       // directly find logs from HDFS.
-      return LogWebServiceUtils
-          .getContainerLogMeta(factory, appId, null, null, containerIdStr,
-              false);
+      return getContainerLogMeta(builder.build(), false);
     }
     // if the application finishes, directly find logs
     // from HDFS.
     if (Apps.isApplicationFinalState(appInfo.getAppState())) {
-      return LogWebServiceUtils
-          .getContainerLogMeta(factory, appId, null, null, containerIdStr,
-              false);
+      return getContainerLogMeta(builder.build(), false);
     }
     if (LogWebServiceUtils.isRunningState(appInfo.getAppState())) {
       String appOwner = appInfo.getUser();
+      builder.setAppOwner(appOwner);
+      WrappedLogMetaRequest request = builder.build();
+
       String nodeHttpAddress = null;
       if (nmId != null && !nmId.isEmpty()) {
         try {
@@ -114,17 +241,17 @@ public class LogServlet extends Configured {
         }
       }
       if (nodeHttpAddress == null || nodeHttpAddress.isEmpty()) {
-        try {
-          nodeHttpAddress = appInfoProvider.getNodeHttpAddress(
-              req, appId.toString(),
-              containerId.getApplicationAttemptId().toString(),
-              containerId.toString(), clusterId);
-        } catch (Exception ex) {
-          // return log meta for the aggregated logs if exists.
-          // It will also return empty log meta for the local logs.
-          return LogWebServiceUtils
-              .getContainerLogMeta(factory, appId, appOwner, null,
-                  containerIdStr, true);
+        if (request.getContainerId() != null) {
+          try {
+            nodeHttpAddress = appInfoProvider.getNodeHttpAddress(
+                req, request.getAppId(), request.getAppAttemptId(),
+                request.getContainerId().toString(), clusterId);
+          } catch (Exception ex) {
+            LOG.info("Could not obtain node HTTP address from provider.", ex);
+            // return log meta for the aggregated logs if exists.
+            // It will also return empty log meta for the local logs.
+            return getContainerLogMeta(request, true);
+          }
         }
         // make sure nodeHttpAddress is not null and not empty. Otherwise,
         // we would only get log meta for aggregated logs instead of
@@ -135,10 +262,14 @@ public class LogServlet extends Configured {
           // It will also return empty log meta for the local logs.
           // If this is the redirect request from NM, we should not
           // re-direct the request back. Simply output the aggregated log meta.
-          return LogWebServiceUtils
-              .getContainerLogMeta(factory, appId, appOwner, null,
-                  containerIdStr, true);
+          return getContainerLogMeta(request, true);
         }
+      }
+      ContainerId containerId = request.getContainerId();
+      if (containerId == null) {
+        throw new WebApplicationException(
+            new Exception("Could not redirect to node, as app attempt or " +
+                "application logs are requested."));
       }
       String uri = "/" + containerId.toString() + "/logs";
       String resURI = JOINER.join(
@@ -192,7 +323,7 @@ public class LogServlet extends Configured {
     try {
       appInfo = appInfoProvider.getApp(req, appId.toString(), clusterId);
     } catch (Exception ex) {
-      // directly find logs from HDFS.
+      LOG.info("Could not obtain appInfo object from provider.", ex);
       return LogWebServiceUtils
           .sendStreamOutputResponse(factory, appId, null, null, containerIdStr,
               filename, format, length, false);
@@ -222,6 +353,7 @@ public class LogServlet extends Configured {
               containerId.getApplicationAttemptId().toString(),
               containerId.toString(), clusterId);
         } catch (Exception ex) {
+          LOG.info("Could not obtain node HTTP address from provider.", ex);
           // output the aggregated logs
           return LogWebServiceUtils
               .sendStreamOutputResponse(factory, appId, appOwner, null,
